@@ -46,7 +46,7 @@ using namespace std;
 using namespace fastjet;
 using namespace fastjet::contrib;
 
-static int NMAX = 1000;
+static int NMAX = 150;
 
 //---------------------------------------------------------------------------
 
@@ -61,8 +61,17 @@ struct PFCand
   float charge = 1;
   float hardfrac = 1;  
   float vtxid = -1;
+  float pdgid = 0;
 };
 
+template <typename T>
+void
+fill(vector<float> &vattr, vector<PFCand> &particles, T fn_attr)
+{
+  vattr.clear();
+  for (auto& p : particles)
+    vattr.push_back(fn_attr(p));
+}
 
 
 //---------------------------------------------------------------------------
@@ -93,17 +102,19 @@ int main(int argc, char *argv[])
   TBranch* partbranch = (TBranch*)itree->GetBranch("Particle");
   TBranch* pfbranch = (TBranch*)itree->GetBranch("ParticleFlowCandidate");
   TBranch* genjetbranch = (TBranch*)itree->GetBranch("GenJet");
+  TBranch* pumbranch = (TBranch*)itree->GetBranch("PileUpMix");
   std::cout << "NEVT: " << nevt << std::endl;
   vector<PFCand> input_particles;
-
+  vector<TLorentzVector> pum_particles;
   vector<PFCand> output_particles;
   output_particles.reserve(NMAX);
 
-  vector<float> vpt, veta, vphi, ve, vpuppi, vpdgid, vhardfrac;
+  vector<float> vpt, veta, vphi, ve, vpuppi, vpdgid, vhardfrac, vvtxid;
   vpt.reserve(NMAX); veta.reserve(NMAX); vphi.reserve(NMAX); 
   ve.reserve(NMAX); vpuppi.reserve(NMAX); vpdgid.reserve(NMAX); 
-  vhardfrac.reserve(NMAX);
-
+  vhardfrac.reserve(NMAX); vvtxid.reserve(NMAX);
+  
+  float pumjetpt=-99., pumjeteta=-99., pumjetphi=-99.,pumjetm=-99.;
   float genjetpt=-99., genjeteta=-99., genjetphi=-99., genjetm=-99.;
   float puppijetpt=-99., puppijeteta=-99., puppijetphi=-99., puppijetm=-99.;
   float truthjetpt=-99., truthjeteta=-99., truthjetphi=-99., truthjetm=-99.;
@@ -134,43 +145,78 @@ int main(int argc, char *argv[])
   tout->Branch("puppi", &vpuppi);
   tout->Branch("pdgid", &vpdgid);
   tout->Branch("hardfrac", &vhardfrac);
+  tout->Branch("vtxid", &vvtxid);
 
 
   ExRootProgressBar progressBar(nevt);
   
   auto comp_p4 = [](auto &a, auto &b) { return a.pt > b.pt; };
 
-  fastjet::JetDefinition *jetDef = new fastjet::JetDefinition(fastjet::antikt_algorithm,0.8);
+  fastjet::JetDefinition *jetDef = new fastjet::JetDefinition(fastjet::antikt_algorithm,0.4);
 
   // Soft drop -- only needed for large radius jets
-  double radius = 0.8;
+  double radius = 0.4;
   double sdZcut = 0.1;
   double sdBeta = 0.;
   
   fastjet::contrib::SoftDrop softDrop = fastjet::contrib::SoftDrop(sdBeta,sdZcut,radius);
-
+  int counter_yeet = 0;
   for (unsigned int k=0; k<nevt; k++){
     itree->GetEntry(k);
-
+    pfjetpt = -99;
+    puppijetpt = -99;
+    truthjetpt = -99;
     if (k%100==0)
       std::cout << k << " / " << nevt << std::endl;
+
+    pum_particles.clear();
+    unsigned int npumjets = pumbranch->GetEntries();
+    npumjets = itree->GetLeaf("PileUpMix_size")->GetValue(0);
+    for (unsigned int j=0; j<npumjets; j++){
+      TLorentzVector pumjet;
+      pumjet.SetPtEtaPhiM(itree->GetLeaf("PileUpMix.PT")->GetValue(j),itree->GetLeaf("PileUpMix.Eta")->GetValue(j),itree->GetLeaf("PileUpMix.Phi")->GetValue(j),itree->GetLeaf("PileUpMix.Mass")->GetValue(j));
+      pumjetpt = pumjet.Pt();
+      pumjeteta = pumjet.Eta();
+      pumjetphi = pumjet.Phi();
+      pumjetm = pumjet.M();
+      if ((abs(itree->GetLeaf("PileUpMix.PID")->GetValue(j))==11||abs(itree->GetLeaf("PileUpMix.PID")->GetValue(j))==11) && pumjetpt>10){
+	pum_particles.push_back(pumjet);
+      }
+      else{
+	continue;
+      }
+    }
 
     unsigned int ngenjets = genjetbranch->GetEntries();
     ngenjets = itree->GetLeaf("GenJet_size")->GetValue(0);
     TLorentzVector genjet;
     for (unsigned int j=0; j<ngenjets; j++){
+      int c = 0;
       genjet.SetPtEtaPhiM(itree->GetLeaf("GenJet.PT")->GetValue(j),itree->GetLeaf("GenJet.Eta")->GetValue(j),itree->GetLeaf("GenJet.Phi")->GetValue(j),itree->GetLeaf("GenJet.Mass")->GetValue(j));
       genjetpt = genjet.Pt();
       genjeteta = genjet.Eta();
       genjetphi = genjet.Phi();
       genjetm = genjet.M();
-      break;// only get leading gen jet
+      for (unsigned int jj = 0; jj<pum_particles.size(); jj++){
+	if(pum_particles[jj].DeltaR(genjet)<.4){
+	  c = 1;
+	  break;
+	}
+	else{
+	  continue;
+	}
+      }
+      if (c == 1){
+	continue;
+      }
+      else{
+	break;// only get leading gen jet
+      }
     }
 
     input_particles.clear();
     unsigned int npfs = pfbranch->GetEntries();
     npfs = itree->GetLeaf("ParticleFlowCandidate_size")->GetValue(0);
-
     for (unsigned int j=0; j<npfs; j++){
       PFCand tmppf;
       tmppf.pt = itree->GetLeaf("ParticleFlowCandidate.PT")->GetValue(j);
@@ -179,6 +225,7 @@ int main(int argc, char *argv[])
       tmppf.e = itree->GetLeaf("ParticleFlowCandidate.E")->GetValue(j);
       tmppf.puppi = itree->GetLeaf("ParticleFlowCandidate.PuppiW")->GetValue(j);
       tmppf.hardfrac = itree->GetLeaf("ParticleFlowCandidate.hardfrac")->GetValue(j);
+      tmppf.pdgid = itree->GetLeaf("ParticleFlowCandidate.PID")->GetValue(j);
       if (itree->GetLeaf("ParticleFlowCandidate.Charge")->GetValue(j)!=0){
         if (itree->GetLeaf("ParticleFlowCandidate.hardfrac")->GetValue(j)==1)
           tmppf.vtxid = 0;
@@ -187,9 +234,13 @@ int main(int argc, char *argv[])
       }
       else
         tmppf.vtxid = -1;
-      input_particles.push_back(tmppf);
+      if((abs(tmppf.pdgid)==11||abs(tmppf.pdgid)==13) && tmppf.pt > 10){
+	continue;
+      }
+      else{
+	input_particles.push_back(tmppf);
+      }
     }
-
     // sorting input particles by pT
     sort(input_particles.begin(), input_particles.end(), comp_p4);
 
@@ -198,8 +249,10 @@ int main(int argc, char *argv[])
     vector<fastjet::PseudoJet> finalStates_pf;
     int pfid = 0;
     for(auto &p : input_particles){
-      if (p.vtxid==1)
+      if (p.vtxid==1){
+	pfid+=1;
 	continue; // Charged Hadron Subtraction
+      }
       TLorentzVector tmp;
       tmp.SetPtEtaPhiE(p.pt,p.eta,p.phi,p.e);
 
@@ -221,7 +274,7 @@ int main(int argc, char *argv[])
 	curjet_truth.set_user_index(pfid);
 	finalStates_truth.emplace_back(curjet_truth);
       }
-      pfid += 1;
+        pfid += 1;
     }
 
 
@@ -234,7 +287,6 @@ int main(int argc, char *argv[])
     vector<fastjet::PseudoJet> allJets_puppi(sorted_by_pt(seq_puppi.inclusive_jets(minpt)));
     vector<fastjet::PseudoJet> allJets_truth(sorted_by_pt(seq_truth.inclusive_jets(minpt)));
     vector<fastjet::PseudoJet> allJets_pf(sorted_by_pt(seq_pf.inclusive_jets(minpt)));
-
     for (auto& puppiJet : allJets_puppi) {
       if (puppiJet.perp() < minpt)
 	break;
@@ -260,7 +312,7 @@ int main(int argc, char *argv[])
 
       TLorentzVector tmp;
       tmp.SetPtEtaPhiM(truthJet.perp(),truthJet.eta(),truthJet.phi(),truthJet.m());
-      if (tmp.DeltaR(genjet)<0.8){
+      if (tmp.DeltaR(genjet)<0.4){
 	truthjetpt = tmp.Pt();
 	truthjeteta = tmp.Eta();
 	truthjetphi = tmp.Phi();
@@ -268,7 +320,9 @@ int main(int argc, char *argv[])
 	break;
       }
     }
-
+    //    cout<<k<<endl;
+    counter_yeet = 0;
+    // cout<<k<<endl;
     for (auto& pfJet : allJets_pf) {
       if (pfJet.perp() < minpt)
 	break;
@@ -284,12 +338,38 @@ int main(int argc, char *argv[])
 	pfjetm = tmp.M();
 	break;
       }
+      counter_yeet++;
+    }
+    if(pfjetpt < 0 || puppijetpt < 0 || truthjetpt < 0)
+      continue;
+    //cout<<counter_yeet<<endl;
+    //cout<<allJets_pf.size()<<endl;
+    // cout<<k<<endl;
+    output_particles.clear();
+    // cout<<k<<endl;
+    std::vector< PseudoJet > constituents = allJets_pf[counter_yeet].constituents();
+    // cout<<k<<endl;
+    TLorentzVector jet(0,0,0,0);
+    //cout<<k<<endl;
+    for(unsigned int j = 0; j<constituents.size(); j++){
+      // TLorentzVector tmp;
+      //tmp.SetPtEtaPhiM(constituents[j].pt(),constituents[j].eta(),constituents[j].phi(),constituents[j].E());
+      //jet += tmp;
+      output_particles.push_back( input_particles[constituents[j].user_index()]);
     }
 
+    output_particles.resize(NMAX);
+    fill(vpt, output_particles, [](PFCand& p) { return p.pt; });
+    fill(veta, output_particles, [](PFCand& p) { return p.eta; });
+    fill(vphi, output_particles, [](PFCand& p) { return p.phi; });
+    fill(ve, output_particles, [](PFCand& p) { return p.e; });
+    fill(vpuppi, output_particles, [](PFCand& p) { return p.puppi; });
+    fill(vpdgid, output_particles, [](PFCand& p) { return p.pdgid; });
+    fill(vhardfrac, output_particles, [](PFCand& p) { return p.hardfrac; });
+    fill(vvtxid, output_particles, [](PFCand& p) { return p.vtxid; }); 
     tout->Fill();
 
     progressBar.Update(k, k);
-
   }
 
   fout->Write();
